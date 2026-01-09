@@ -1,105 +1,80 @@
-"""Gameplay systems (messages, TV, breaches, hallucinations)."""
+"""Systems for time, meters, noise, and spawning."""
 
 import random
 
-from .config import (
+from .constants import (
     BREACH_BASE,
     BREACH_CURSE_BONUS,
-    BREACH_FAN_BONUS,
-    BREACH_MOVE_BONUS,
-    BREACH_TV_BONUS,
+    DAY_HOURS,
     HALLUCINATION_BASE,
+    HOUR_SECONDS,
+    HOURS_PER_DAY,
+    MORNING_HOURS,
 )
 
 
-class MessageLog:
-    def __init__(self, limit=5):
-        self.limit = limit
-        self.lines = []
-
-    def add(self, text):
-        self.lines.append(text)
-        if len(self.lines) > self.limit:
-            self.lines.pop(0)
-
-
-class TVSystem:
+class TimeSystem:
     def __init__(self):
-        self.on = False
-        self.timer = 0.0
-        self.next_broadcast = 9.0
-        self.dread_timer = 0.0
-        self.truth_bias = 0.75
+        self.time = 0.0
 
-    def set_on(self, state):
-        self.on = state
+    def update(self, dt):
+        self.time += dt
 
-    def update(self, dt, context):
-        if not self.on:
-            return []
-        self.timer += dt
-        events = []
-        if self.timer >= self.next_broadcast:
-            self.timer = 0.0
-            self.next_broadcast = random.uniform(8.0, 14.0)
-            events.append(self.broadcast(context))
-            if random.random() < 0.2:
-                self.dread_timer = 6.0
-                events.append("The broadcast spikes with static.")
-        if self.dread_timer > 0:
-            self.dread_timer -= dt
-        return [e for e in events if e]
+    def day(self):
+        return int(self.time // (HOUR_SECONDS * HOURS_PER_DAY)) + 1
 
-    def broadcast(self, context):
-        truthful = random.random() < self.truth_bias
-        hints = []
-        if context["refill_soon"]:
-            hints.append(("RESOURCE", "Resource refill soon."))
-        if context["breach_rising"]:
-            hints.append(("BREACH", "Breach probability rising."))
-        if context["real_near"]:
-            hints.append(("REAL", "Real presence near."))
-        if not hints:
-            hints.append(("STATIC", "Signal drops to blue noise."))
-        hint = random.choice(hints)
-        if truthful:
-            return f"TV: {hint[1]}"
-        return f"TV: {random.choice(['All clear.', 'Static is harmless.', 'Stay in the living room.', 'No breach expected.'])}"
+    def hour(self):
+        hour_in_day = int((self.time % (HOUR_SECONDS * HOURS_PER_DAY)) // HOUR_SECONDS) + 1
+        return hour_in_day
+
+    def phase(self):
+        hour = self.hour()
+        if hour in MORNING_HOURS:
+            return "morning"
+        if hour in DAY_HOURS:
+            return "day"
+        return "night"
 
 
-class BreachSystem:
+class NoiseSystem:
     def __init__(self):
-        self.timer = 0.0
+        self.value = 0.0
+        self.peak = 0.0
 
-    def update(self, dt, context):
-        self.timer += dt
-        if self.timer < 1.0:
-            return False
-        self.timer = 0.0
-        base = BREACH_BASE
-        if context["tv_on"]:
-            base += BREACH_TV_BONUS
-        if context["fan_on"]:
-            base += BREACH_FAN_BONUS
-        if context["moving"]:
-            base += BREACH_MOVE_BONUS
-        if context["curse"]:
-            base += BREACH_CURSE_BONUS
-        roll = random.random() < base
-        return roll
+    def add(self, amount):
+        self.value = min(100, self.value + amount)
+        self.peak = max(self.peak, self.value)
+
+    def decay(self, amount):
+        self.value = max(0.0, self.value - amount)
 
 
-class HallucinationSystem:
+class SpawnSystem:
     def __init__(self):
-        self.active = False
-        self.timer = 0.0
+        self.ghost_timer = 0.0
+        self.hallucination_timer = 0.0
+        self.tentacle_ready = False
 
-    def update(self, dt, sanity):
-        self.timer += dt
-        if self.active:
+    def update_ghost(self, dt, day, room):
+        self.ghost_timer += dt
+        if self.ghost_timer < 10.0:
             return False
-        if self.timer < 1.5:
+        self.ghost_timer = 0.0
+        if day <= 2 and room != "Living Room":
             return False
-        self.timer = 0.0
-        chance = HALLUCINATION_BASE + (1.0 - sanity / 100.0) * 0.14
+        base = 0.2 if day <= 2 else 0.35
+        return random.random() < base
+
+    def update_hallucination(self, dt, sanity, room):
+        self.hallucination_timer += dt
+        if self.hallucination_timer < 6.0:
+            return False
+        self.hallucination_timer = 0.0
+        if room != "Living Room":
+            return False
+        chance = HALLUCINATION_BASE + (1.0 - sanity / 100.0) * 0.2
+        return random.random() < chance
+
+    def breach_roll(self, curse_active):
+        chance = BREACH_BASE + (BREACH_CURSE_BONUS if curse_active else 0)
         return random.random() < chance

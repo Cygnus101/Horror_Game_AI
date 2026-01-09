@@ -1,0 +1,86 @@
+"""Shared constants for the game."""
+
+WIDTH, HEIGHT = 960, 540
+FPS = 60
+
+ROOM_LIVING = "Living Room"
+ROOM_BATH = "Bathroom"
+
+PLAYER_SPEED = 185
+PLAYER_SIZE = 28
+DOG_SPEED = 140
+
+METER_MAX = 100
+
+# Time: 1 hour = 120 seconds, 12 hours per day
+HOUR_SECONDS = 120.0
+HOURS_PER_DAY = 12
+DAY_SECONDS = HOUR_SECONDS * HOURS_PER_DAY
+TOTAL_DAYS = 5
+
+# Phase hour ranges (1-4, 5-8, 9-12)
+MORNING_HOURS = range(1, 5)
+DAY_HOURS = range(5, 9)
+NIGHT_HOURS = range(9, 13)
+
+HUNGER_DRAIN_MORNING = 1.2  # per minute
+THIRST_DRAIN_MORNING = 1.6
+SANITY_DRAIN_MORNING = 0.6
+
+HUNGER_DRAIN_DAY = 0.7
+THIRST_DRAIN_DAY = 0.9
+SANITY_DRAIN_DAY = 0.4
+
+HUNGER_DRAIN_NIGHT = 0.0
+THIRST_DRAIN_NIGHT = 0.0
+SANITY_DRAIN_NIGHT = 1.2
+
+TV_SANITY_GAIN = 0.8  # per minute
+FAN_SANITY_REDUCE = 0.25  # sanity drain reduction per minute
+TV_OVERUSE_LIMIT = 120.0  # seconds
+TV_OVERUSE_PENALTY = 8.0
+
+NOISE_DECAY = 6.0  # per minute
+NOISE_TV = 10.0
+NOISE_FAN = 6.0
+NOISE_MOVE = 10.0
+NOISE_TORCH = 8.0
+NOISE_THRESHOLD_TENTACLE = 80
+
+GHOST_SPEED = 70
+TENTACLE_SPEED = 90
+HALLUCINATION_SPEED = 55
+
+GHOST_KILL_TIME = 10.0
+GHOST_BANISH_TIME = 8.0
+
+HALLUCINATION_BASE = 0.03
+BREACH_BASE = 0.02
+BREACH_CURSE_BONUS = 0.05
+
+STRANGE_LIQUID_COOLDOWN = 20.0
+STRANGE_LIQUID_CURSE = 40.0
+
+AXE_DAY = 5
+AXE_RANGE = 90
+AXE_COOLDOWN = 1.0
+
+# Colors
+BLACK = (12, 12, 14)
+WHITE = (240, 240, 240)
+GRAY = (90, 90, 90)
+LIGHT_GRAY = (150, 150, 150)
+RED = (220, 70, 70)
+GREEN = (70, 180, 90)
+BLUE = (80, 120, 220)
+YELLOW = (220, 200, 80)
+PURPLE = (150, 90, 160)
+
+ASSET_BG_LIVING = "backgrounds/living_room.png"
+ASSET_BG_BATH = "backgrounds/bathroom.png"
+ASSET_PLAYER = "sprites/man.png"
+ASSET_DOG = "sprites/dog.png"
+ASSET_DEAD_DOG = "sprites/dead_dog.png"
+ASSET_GHOST = "sprites/girl_ghost.png"
+ASSET_GHOST_RED = "sprites/girl_ghost_red_eyes.png"
+ASSET_TENTACLE = "sprites/tentacle_monster.png"

@@ -1,17 +1,16 @@
-"""Simple procedural audio for jumpscares."""
+"""Procedural audio helpers."""
 
-import math
 import array
+import math
 
 import pygame
 
 
-def make_beep(freq=440, duration=0.6, volume=0.5, sample_rate=44100):
+def make_beep(freq=520, duration=0.25, volume=0.4, sample_rate=44100):
     length = int(sample_rate * duration)
     buf = array.array("h")
     amp = int(32767 * volume)
     for i in range(length):
         t = i / sample_rate
-        val = int(amp * math.sin(2 * math.pi * freq * t))
-        buf.append(val)
+        buf.append(int(amp * math.sin(2 * math.pi * freq * t)))
     return pygame.mixer.Sound(buffer=buf.tobytes())

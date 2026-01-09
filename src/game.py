@@ -6,52 +6,47 @@ import random
 
 import pygame
 
-from . import assets
+from .assets import load_assets
 from .audio import make_beep
-from .config import (
-    ASSET_DEAD_GIRL,
-    ASSET_DOOR,
-    ASSET_FAN,
-    ASSET_HALLUCINATION,
-    ASSET_JUMPSCARE_GIRL,
-    ASSET_JUMPSCARE_TENTACLE,
-    ASSET_MIRROR,
-    ASSET_PLAYER,
-    ASSET_SINK,
-    ASSET_TENTACLE,
-    ASSET_TV,
-    ASSET_VENT,
-    ASSET_WINDOW,
+from .constants import (
+    AXE_COOLDOWN,
+    AXE_DAY,
+    AXE_RANGE,
+    DAY_SECONDS,
     FPS,
-    GROUNDING_BASE_GAIN,
-    GROUNDING_BASE_THIRST_COST,
-    GROUNDING_COOLDOWN,
-    GROUNDING_WINDOW,
+    GHOST_BANISH_TIME,
+    GHOST_KILL_TIME,
     HEIGHT,
-    HUNGER_DRAIN,
-    HUNGER_DEATH,
-    LIQUID_COOLDOWN,
-    LIQUID_CURSE_TIME,
-    LIQUID_FREEZE_TIME,
-    LIQUID_TENTACLE_THRESHOLD,
+    HOUR_SECONDS,
+    HUNGER_DRAIN_DAY,
+    HUNGER_DRAIN_MORNING,
+    HUNGER_DRAIN_NIGHT,
+    METER_MAX,
     NOISE_DECAY,
-    NOISE_FROM_FAN,
-    NOISE_FROM_SINK,
-    NOISE_FROM_TV,
+    NOISE_FAN,
+    NOISE_MOVE,
+    NOISE_THRESHOLD_TENTACLE,
+    NOISE_TORCH,
+    NOISE_TV,
     PLAYER_SPEED,
     ROOM_BATH,
     ROOM_LIVING,
-    SAFE_ROOM_HOLD,
-    SANITY_DEATH,
-    SANITY_DRAIN,
-    THIRST_DEATH,
-    THIRST_DRAIN,
+    SANITY_DRAIN_DAY,
+    SANITY_DRAIN_MORNING,
+    SANITY_DRAIN_NIGHT,
+    STRANGE_LIQUID_COOLDOWN,
+    STRANGE_LIQUID_CURSE,
+    THIRST_DRAIN_DAY,
+    THIRST_DRAIN_MORNING,
+    THIRST_DRAIN_NIGHT,
+    TV_OVERUSE_LIMIT,
+    TV_OVERUSE_PENALTY,
+    TV_SANITY_GAIN,
+    WHITE,
     WIDTH,
-    WIN_NIGHTS,
-    DAY_LENGTH,
 )
-from .entities import Interactable, Monster, Player
-from .systems import BreachSystem, HallucinationSystem, MessageLog, TVSystem
+from .entities import Dog, Ghost, Hallucination, Player, Tentacle, distance
+from .systems import NoiseSystem, SpawnSystem, TimeSystem
 from .ui import UI
 
 
@@ -59,434 +54,427 @@ def clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
 
+def in_cone(origin, target, direction, max_angle=40, max_distance=260):
+    dx = target[0] - origin[0]
+    dy = target[1] - origin[1]
+    dist = math.hypot(dx, dy)
+    if dist > max_distance:
+        return False
+    if dist == 0:
+        return True
+    nx, ny = dx / dist, dy / dist
+    dot = nx * direction[0] + ny * direction[1]
+    angle = math.degrees(math.acos(clamp(dot, -1, 1)))
+    return angle <= max_angle
+
+
 class GameState:
     def __init__(self, asset_root):
         self.asset_root = asset_root
-        self.current_room = ROOM_LIVING
-        self.living_rect = pygame.Rect(60, 60, 560, 420)
-        self.bath_rect = pygame.Rect(660, 140, 240, 260)
+        self.assets = load_assets(asset_root)
+        self.ui = UI(pygame.display.get_surface())
 
-        self.player = Player(self.living_rect.centerx, self.living_rect.centery)
+        self.current_room = ROOM_LIVING
+        self.living_bounds = pygame.Rect(40, 40, 880, 460)
+        self.bath_bounds = pygame.Rect(80, 80, 800, 420)
+
+        self.obstacles = {
+            ROOM_LIVING: [
+                pygame.Rect(360, 220, 180, 80),
+                pygame.Rect(120, 380, 160, 40),
+            ],
+            ROOM_BATH: [
+                pygame.Rect(520, 160, 200, 80),
+                pygame.Rect(150, 300, 200, 60),
+            ],
+        }
+
+        self.interact_zones = {
+            "TV": pygame.Rect(140, 160, 80, 40),
+            "Fan": pygame.Rect(260, 180, 40, 40),
+            "Door": pygame.Rect(60, 240, 40, 80),
+            "Sink": pygame.Rect(200, 220, 80, 40),
+            "Bathtub": pygame.Rect(540, 160, 160, 80),
+            "Mirror": pygame.Rect(620, 220, 80, 60),
+            "Stash": pygame.Rect(420, 360, 80, 40),
+        }
+
+        self.player = Player(self.living_bounds.centerx, self.living_bounds.centery)
         self.player.speed = PLAYER_SPEED
+        self.player_dir = (1, 0)
+
+        self.dog = Dog(self.player.rect.centerx - 40, self.player.rect.centery + 20)
+        self.dog_dead = False
+
+        self.ghost = None
+        self.hallucination = None
+        self.tentacle = None
 
         self.sanity = 75.0
         self.hunger = 70.0
         self.thirst = 70.0
-        self.noise = 0.0
-        self.dread = 0.0
+        self.torch_battery = 100.0
+        self.torch_on = False
 
         self.inventory = {"food": 3, "water": 2, "liquid": 1}
         self.liquid_uses = 0
         self.liquid_last = -100.0
-        self.liquid_freeze = 0.0
         self.curse_timer = 0.0
 
-        self.msg_log = MessageLog()
-        self.msg_log.add("You are trapped inside. Outside means death.")
+        self.noise = NoiseSystem()
+        self.spawn = SpawnSystem()
+        self.time_system = TimeSystem()
 
-        self.objects = []
-        self.interactables = []
-        self.build_objects()
+        self.messages = []
+        self.max_messages = 5
 
-        self.tv_system = TVSystem()
-        self.breach_system = BreachSystem()
-        self.hallucination_system = HallucinationSystem()
+        self.tv_on = False
+        self.fan_on = False
+        self.tv_time = 0.0
+        self.tv_overuse = 0.0
 
-        self.monster = None
-        self.hallucination = None
-        self.hallucinating = False
-
-        self.time = 0.0
         self.dead = False
-        self.win = False
         self.death_cause = ""
         self.death_monster = ""
+        self.noise_peak = 0.0
+        self.win = False
 
-        self.safe_room_timer = 0.0
-        self.env_cue = None
-        self.device_cue_timer = 0.0
-        self.light_flicker_timer = 0.0
-
-        self.refill_timer = random.uniform(40.0, 80.0)
+        self.ghost_attack_timer = 0.0
+        self.ghost_hint_timer = 0.0
+        self.hallucination_active = False
+        self.tv_broadcast_timer = 0.0
+        self.refill_timer = random.uniform(90.0, 140.0)
         self.refill_soon = False
-
         self.grounding_last = -100.0
         self.grounding_history = []
 
-    def build_objects(self):
-        self.objects = [
-            {
-                "name": "TV",
-                "rect": pygame.Rect(self.living_rect.x + 80, self.living_rect.y + 70, 48, 32),
-                "room": ROOM_LIVING,
-                "sprite": ASSET_TV,
-            },
-            {
-                "name": "Fan",
-                "rect": pygame.Rect(self.living_rect.x + 220, self.living_rect.y + 120, 32, 32),
-                "room": ROOM_LIVING,
-                "sprite": ASSET_FAN,
-            },
-            {
-                "name": "Cabinet",
-                "rect": pygame.Rect(self.living_rect.x + 400, self.living_rect.y + 300, 44, 30),
-                "room": ROOM_LIVING,
-                "sprite": ASSET_SINK,
-            },
-            {
-                "name": "Stash",
-                "rect": pygame.Rect(self.living_rect.x + 300, self.living_rect.y + 260, 40, 30),
-                "room": ROOM_LIVING,
-                "sprite": ASSET_VENT,
-            },
-            {
-                "name": "Outside Door",
-                "rect": pygame.Rect(self.living_rect.x + 12, self.living_rect.y + 200, 26, 60),
-                "room": ROOM_LIVING,
-                "sprite": ASSET_DOOR,
-            },
-            {
-                "name": "Window",
-                "rect": pygame.Rect(self.living_rect.x + 220, self.living_rect.y + 20, 44, 26),
-                "room": ROOM_LIVING,
-                "sprite": ASSET_WINDOW,
-            },
-            {
-                "name": "Vent",
-                "rect": pygame.Rect(self.living_rect.x + 460, self.living_rect.y + 20, 36, 18),
-                "room": ROOM_LIVING,
-                "sprite": ASSET_VENT,
-            },
-            {
-                "name": "Mirror",
-                "rect": pygame.Rect(self.bath_rect.x + 150, self.bath_rect.y + 40, 36, 46),
-                "room": ROOM_BATH,
-                "sprite": ASSET_MIRROR,
-            },
-            {
-                "name": "Sink",
-                "rect": pygame.Rect(self.bath_rect.x + 40, self.bath_rect.y + 60, 40, 24),
-                "room": ROOM_BATH,
-                "sprite": ASSET_SINK,
-            },
-        ]
+        self.has_axe = False
+        self.axe_cooldown = 0.0
+        self.bark_sound = make_beep(620, 0.2, 0.5)
+        self.tv_static_timer = 0.0
+        self.stash_stock = 4
 
-        self.interactables = [
-            Interactable("TV", self.get_object_rect("TV"), "Press T to toggle TV"),
-            Interactable("Fan", self.get_object_rect("Fan"), "Press F to toggle Fan"),
-            Interactable("Cabinet", self.get_object_rect("Cabinet"), "Press E to search cabinet"),
-            Interactable("Stash", self.get_object_rect("Stash"), "Press E to search stash"),
-            Interactable("Outside Door", self.get_object_rect("Outside Door"), "Press E to open outside door"),
-            Interactable("Mirror", self.get_object_rect("Mirror"), "Press B to ground yourself"),
-            Interactable("Sink", self.get_object_rect("Sink"), "Press E to use sink"),
-        ]
+    @property
+    def day(self):
+        return self.time_system.day()
 
-        self.stash_stock = {"Cabinet": 3, "Stash": 2}
+    @property
+    def hour(self):
+        return self.time_system.hour()
 
-    def get_object_rect(self, name):
-        for obj in self.objects:
-            if obj["name"] == name:
-                return obj["rect"]
-        return pygame.Rect(0, 0, 0, 0)
+    @property
+    def phase(self):
+        return self.time_system.phase()
 
-    def set_message(self, text):
-        self.msg_log.add(text)
+    def add_message(self, text):
+        self.messages.append(text)
+        if len(self.messages) > self.max_messages:
+            self.messages.pop(0)
 
-    def current_night(self):
-        return int(self.time / DAY_LENGTH) + 1
+    def room_bounds(self):
+        return self.living_bounds if self.current_room == ROOM_LIVING else self.bath_bounds
+
+    def current_obstacles(self):
+        return self.obstacles[self.current_room]
 
     def switch_room(self):
-        if self.current_room == ROOM_LIVING:
-            self.current_room = ROOM_BATH
-            self.player.rect.center = self.bath_rect.center
-            self.set_message("You step into the bathroom.")
-        else:
-            self.current_room = ROOM_LIVING
-            self.player.rect.center = self.living_rect.center
-            self.set_message("You step into the living room.")
+        self.current_room = ROOM_BATH if self.current_room == ROOM_LIVING else ROOM_LIVING
+        bounds = self.room_bounds()
+        self.player.rect.center = (bounds.centerx, bounds.centery)
+        self.add_message(f"Entered {self.current_room}.")
 
-    def die(self, reason, monster_name=""):
+    def update(self, dt):
+        if self.dead or self.win:
+            return
+        self.time_system.update(dt)
+        self.update_day_state()
+        self.update_meters(dt)
+        self.update_noise(dt)
+        self.update_events(dt)
+        self.update_tv(dt)
+        self.update_enemies(dt)
+        self.update_dog(dt)
+        self.check_win()
+
+    def update_day_state(self):
+        if self.day > 2 and not self.dog_dead:
+            self.dog_dead = True
+            self.dog.alive = False
+            self.add_message("A heavy silence... the dog is gone.")
+        if self.day == AXE_DAY:
+            self.has_axe = True
+
+    def update_meters(self, dt):
+        minute = dt / 60.0
+        if self.phase == "morning":
+            self.hunger = clamp(self.hunger - HUNGER_DRAIN_MORNING * minute, 0, 100)
+            self.thirst = clamp(self.thirst - THIRST_DRAIN_MORNING * minute, 0, 100)
+            self.sanity = clamp(self.sanity - SANITY_DRAIN_MORNING * minute, 0, 100)
+        elif self.phase == "day":
+            self.hunger = clamp(self.hunger - HUNGER_DRAIN_DAY * minute, 0, 100)
+            self.thirst = clamp(self.thirst - THIRST_DRAIN_DAY * minute, 0, 100)
+            self.sanity = clamp(self.sanity - SANITY_DRAIN_DAY * minute, 0, 100)
+        else:
+            self.hunger = clamp(self.hunger - HUNGER_DRAIN_NIGHT * minute, 0, 100)
+            self.thirst = clamp(self.thirst - THIRST_DRAIN_NIGHT * minute, 0, 100)
+            self.sanity = clamp(self.sanity - SANITY_DRAIN_NIGHT * minute, 0, 100)
+
+        if self.tv_on:
+            self.sanity = clamp(self.sanity + TV_SANITY_GAIN * minute, 0, 100)
+            self.tv_time += dt
+            self.tv_overuse += dt
+            if self.tv_overuse > TV_OVERUSE_LIMIT and random.random() < 0.02:
+                self.sanity = clamp(self.sanity - TV_OVERUSE_PENALTY, 0, 100)
+                self.add_message("The TV hum digs into your skull.")
+        else:
+            self.tv_overuse = max(0.0, self.tv_overuse - dt * 0.5)
+
+        if self.fan_on:
+            self.sanity = clamp(self.sanity + 0.2 * minute, 0, 100)
+
+        if self.torch_on:
+            self.torch_battery = clamp(self.torch_battery - 7.0 * minute, 0, 100)
+            if self.torch_battery <= 0:
+                self.torch_on = False
+
+        if self.ghost and not self.ghost.banished:
+            self.sanity = clamp(self.sanity - 0.7 * minute, 0, 100)
+
+        if self.hallucination:
+            dist = distance(self.player.rect.center, (self.hallucination.x, self.hallucination.y))
+            if dist < 90 and random.random() < 0.2:
+                self.sanity = clamp(self.sanity - 2.0, 0, 100)
+
+        if self.hunger <= 0:
+            self.kill("Hunger")
+        if self.thirst <= 0:
+            self.kill("Thirst")
+        if self.sanity <= 0:
+            self.kill("Sanity")
+
+    def update_noise(self, dt):
+        minute = dt / 60.0
+        if self.tv_on:
+            self.noise.add(NOISE_TV * minute)
+        if self.fan_on:
+            self.noise.add(NOISE_FAN * minute)
+        if self.player.moving:
+            self.noise.add(NOISE_MOVE * minute)
+        if self.torch_on:
+            self.noise.add(NOISE_TORCH * minute)
+        self.noise.decay(NOISE_DECAY * minute)
+        self.noise_peak = self.noise.peak
+
+        if self.noise.value >= NOISE_THRESHOLD_TENTACLE and not self.tentacle:
+            self.spawn_tentacle()
+            self.add_message("Something drops from above.")
+
+    def update_events(self, dt):
+        if self.curse_timer > 0:
+            self.curse_timer -= dt
+        if not self.ghost and self.spawn.update_ghost(dt, self.day, self.current_room):
+            self.spawn_ghost()
+        if not self.hallucination and self.spawn.update_hallucination(dt, self.sanity, self.current_room):
+            self.spawn_hallucination()
+
+        if self.phase == "night" and not self.tentacle and self.day >= 4:
+            if random.random() < 0.01:
+                self.spawn_tentacle()
+        if self.liquid_uses >= 3 and not self.tentacle:
+            if random.random() < 0.015:
+                self.spawn_tentacle()
+        self.refill_timer -= dt
+        self.refill_soon = self.refill_timer < 20.0
+        if self.refill_timer <= 0:
+            if random.random() < 0.5:
+                self.inventory["food"] += 1
+                self.add_message("You find a hidden can nearby.")
+            else:
+                self.inventory["water"] += 1
+                self.add_message("A bottle is left by the sink.")
+            self.refill_timer = random.uniform(120.0, 200.0)
+
+    def update_tv(self, dt):
+        if not self.tv_on:
+            self.tv_broadcast_timer = 0.0
+            return
+        self.tv_broadcast_timer += dt
+        if self.tv_broadcast_timer < 8.0:
+            return
+        self.tv_broadcast_timer = 0.0
+        truth_bias = 0.75 if self.curse_timer <= 0 else 0.45
+        truthful = random.random() < truth_bias
+        hints = []
+        if self.refill_soon:
+            hints.append("Resource refill soon.")
+        if self.ghost or self.tentacle:
+            hints.append("Breath of something nearby.")
+        if self.phase == "night":
+            hints.append("Breach probability rising.")
+        if not hints:
+            hints.append("Static drifts across the screen.")
+        if truthful:
+            self.add_message(f"TV: {random.choice(hints)}")
+        else:
+            self.add_message(f\"TV: {random.choice(['All clear.', 'No breach expected.', 'Stay by the door.', 'Nothing out there.'])}\")
+        if random.random() < 0.2:
+            self.sanity = clamp(self.sanity - 6, 0, 100)
+            self.add_message("The broadcast buzzes inside your head.")
+
+    def update_enemies(self, dt):
+        if self.ghost:
+            self.ghost.update(dt, self.player.rect.center)
+            if self.ghost.banished:
+                return
+            self.ghost_attack_timer += dt
+            if self.ghost_attack_timer >= GHOST_KILL_TIME:
+                self.kill("Monster", "Dead Girl")
+            if self.torch_on and self.torch_hits(self.ghost.rect()):
+                self.ghost.banish(GHOST_BANISH_TIME)
+                self.ghost_attack_timer = 0.0
+                self.add_message("The torch burns her away.")
+            self.ghost_hint_timer = max(0.0, self.ghost_hint_timer - dt)
+        if self.hallucination:
+            self.hallucination.update(dt, self.player.rect.center)
+            if self.hallucination.life <= 0:
+                self.hallucination = None
+                self.hallucination_active = False
+        if self.tentacle:
+            self.tentacle.update(dt, self.player.rect.center)
+            if self.tentacle.rect().colliderect(self.player.rect):
+                self.kill("Monster", "Tentacle Monster")
+
+        if self.axe_cooldown > 0:
+            self.axe_cooldown -= dt
+
+    def update_dog(self, dt):
+        if self.dog.alive:
+            self.dog.update(dt, self.player.rect.center)
+
+    def kill(self, cause, monster_name=""):
         self.dead = True
-        self.death_cause = reason
+        self.death_cause = cause
         self.death_monster = monster_name
+
+    def check_win(self):
+        if self.time_system.time >= DAY_SECONDS * 5:
+            self.win = True
+
+    def time_breakdown(self):
+        total = self.time_system.time
+        day = self.time_system.day()
+        hour = self.time_system.hour()
+        minute = int((total % HOUR_SECONDS) / (HOUR_SECONDS / 60.0))
+        return day, hour, minute
+
+    def spawn_ghost(self):
+        x = self.living_bounds.centerx if self.current_room == ROOM_LIVING else self.bath_bounds.centerx
+        y = self.living_bounds.centery if self.current_room == ROOM_LIVING else self.bath_bounds.centery
+        self.ghost = Ghost(x, y)
+        self.ghost_attack_timer = 0.0
+        if self.dog.alive:
+            self.dog.bark()
+            self.bark_sound.play()
+            self.add_message("The dog barks at the air.")
+        self.add_message("A girl appears in the corner of your eye.")
+
+    def spawn_hallucination(self):
+        self.hallucination = Hallucination(self.living_bounds.centerx - 160, self.living_bounds.centery)
+        self.hallucination_active = True
+        self.add_message("A hollow figure drifts near.")
+
+    def spawn_tentacle(self):
+        self.tentacle = Tentacle(self.living_bounds.right - 60, self.living_bounds.top + 60)
+
+    def torch_hits(self, target_rect):
+        origin = self.player.rect.center
+        return in_cone(origin, target_rect.center, self.player_dir)
 
     def use_item(self, idx):
         if idx == 1 and self.inventory["food"] > 0:
             self.inventory["food"] -= 1
             self.hunger = clamp(self.hunger + 30, 0, 100)
-            self.set_message("You eat canned food.")
+            self.add_message("You eat food.")
         elif idx == 2 and self.inventory["water"] > 0:
             self.inventory["water"] -= 1
-            self.thirst = clamp(self.thirst + 32, 0, 100)
-            self.set_message("You drink water.")
+            self.thirst = clamp(self.thirst + 30, 0, 100)
+            self.add_message("You drink water.")
         elif idx == 3 and self.inventory["liquid"] > 0:
-            if self.time - self.liquid_last < LIQUID_COOLDOWN:
-                self.set_message("Your body rejects more liquid.")
+            if self.time_system.time - self.liquid_last < STRANGE_LIQUID_COOLDOWN:
+                self.add_message("Your body rejects more liquid.")
                 return
             self.inventory["liquid"] -= 1
-            self.liquid_last = self.time
+            self.liquid_last = self.time_system.time
             self.liquid_uses += 1
-            self.curse_timer = LIQUID_CURSE_TIME
-            self.tv_system.truth_bias = 0.45
-            if random.random() < 0.5:
-                self.sanity = clamp(self.sanity + 28, 0, 100)
-                self.set_message("The strange liquid calms your mind.")
-            else:
-                self.liquid_freeze = LIQUID_FREEZE_TIME
-                self.set_message("Your body goes cold. Needs fade.")
-            self.set_message("A heavy presence listens now.")
+            self.curse_timer = STRANGE_LIQUID_CURSE
+            self.hunger = clamp(self.hunger + 25, 0, 100)
+            self.thirst = clamp(self.thirst + 25, 0, 100)
+            self.sanity = clamp(self.sanity - 8, 0, 100)
+            self.add_message("The liquid soothes your body, but twists your mind.")
 
-    def interact(self, name):
-        if name == "Outside Door":
-            self.die("Outside", "Outside")
+    def axe_attack(self):
+        if not self.has_axe or self.axe_cooldown > 0:
             return
-        if name in ("Cabinet", "Stash"):
-            if self.stash_stock[name] <= 0:
-                self.set_message("The stash is empty.")
+        self.axe_cooldown = AXE_COOLDOWN
+        if self.tentacle and self.tentacle.in_range(self.player.rect.center):
+            self.tentacle = None
+            self.add_message("You sever the tentacle.")
+
+    def interact(self):
+        if self.current_room == ROOM_LIVING and self.interact_zones["Door"].colliderect(self.player.rect):
+            self.kill("Outside", "Outside")
+            return
+        if self.current_room == ROOM_LIVING and self.interact_zones["TV"].colliderect(self.player.rect):
+            self.tv_on = not self.tv_on
+            self.add_message("TV on." if self.tv_on else "TV off.")
+            return
+        if self.current_room == ROOM_LIVING and self.interact_zones["Fan"].colliderect(self.player.rect):
+            self.fan_on = not self.fan_on
+            self.add_message("Fan on." if self.fan_on else "Fan off.")
+            return
+        if self.current_room == ROOM_LIVING and self.interact_zones["Stash"].colliderect(self.player.rect):
+            if self.stash_stock <= 0:
+                self.add_message("The stash is empty.")
                 return
-            self.stash_stock[name] -= 1
+            self.stash_stock -= 1
             if random.random() < 0.5:
                 self.inventory["food"] += 1
-                self.set_message("Found food.")
+                self.add_message("You find food.")
             else:
                 self.inventory["water"] += 1
-                self.set_message("Found water.")
+                self.add_message("You find water.")
             return
-        if name == "Sink":
+        if self.current_room == ROOM_BATH and self.interact_zones["Sink"].colliderect(self.player.rect):
             self.inventory["water"] += 1
-            self.noise = clamp(self.noise + 12, 0, 100)
-            if random.random() < 0.3:
-                self.sanity = clamp(self.sanity - 8, 0, 100)
-                self.set_message("The water tastes wrong.")
-            else:
-                self.set_message("You refill a bottle.")
-            return
+            self.add_message("You fill a bottle.")
 
     def grounding(self):
         if self.current_room != ROOM_BATH:
             return
-        if self.time - self.grounding_last < GROUNDING_COOLDOWN:
-            self.set_message("You need a moment before grounding again.")
+        if self.time_system.time - self.grounding_last < 6.0:
+            self.add_message("You need a moment to steady yourself.")
             return
-        self.grounding_last = self.time
-        self.grounding_history = [t for t in self.grounding_history if self.time - t < GROUNDING_WINDOW]
+        self.grounding_last = self.time_system.time
+        self.grounding_history = [t for t in self.grounding_history if self.time_system.time - t < 60.0]
         recent = len(self.grounding_history)
-        self.grounding_history.append(self.time)
+        self.grounding_history.append(self.time_system.time)
         factor = 1.0 / (1.0 + recent * 0.6)
-        gain = GROUNDING_BASE_GAIN * factor
-        thirst_cost = GROUNDING_BASE_THIRST_COST * (1.0 + recent * 0.4)
-        self.thirst = clamp(self.thirst - thirst_cost, 0, 100)
-        self.sanity = clamp(self.sanity + gain, 0, 100)
-        self.hallucination = None
-        self.hallucinating = False
-        if factor < 0.7:
-            self.set_message("It isn't working as well...")
-        else:
-            self.set_message("You steady yourself.")
-
-    def update(self, dt):
-        self.time += dt
-        if self.curse_timer > 0:
-            self.curse_timer -= dt
-        else:
-            self.tv_system.truth_bias = 0.75
-        if self.liquid_freeze > 0:
-            self.liquid_freeze -= dt
-
-        if not self.dead and not self.win:
-            self.update_meters(dt)
-            self.update_refill(dt)
-            self.update_systems(dt)
-            self.update_monsters(dt)
-            self.check_win()
-
-    def update_meters(self, dt):
-        minute = dt / 60.0
-        if self.liquid_freeze <= 0:
-            self.hunger = clamp(self.hunger - HUNGER_DRAIN * minute, 0, 100)
-            self.thirst = clamp(self.thirst - THIRST_DRAIN * minute, 0, 100)
-        sanity_drain = SANITY_DRAIN
-        if self.tv_system.on:
-            sanity_drain += 0.1
-        if self.fan_on:
-            sanity_drain -= 0.15
-        if self.monster and self.monster.real:
-            sanity_drain += 0.8
-        self.sanity = clamp(self.sanity - sanity_drain * minute, 0, 100)
-
-        noise_gain = 0.0
-        if self.tv_system.on:
-            noise_gain += NOISE_FROM_TV * minute
-        if self.fan_on:
-            noise_gain += NOISE_FROM_FAN * minute
-        self.noise = clamp(self.noise + noise_gain - NOISE_DECAY * minute, 0, 100)
-
-        if self.hunger <= HUNGER_DEATH:
-            self.die("Hunger")
-        if self.thirst <= THIRST_DEATH:
-            self.die("Thirst")
-        if self.sanity <= SANITY_DEATH:
-            self.die("Sanity")
-
-    def update_refill(self, dt):
-        self.refill_timer -= dt
-        self.refill_soon = self.refill_timer < 12.0
-        if self.refill_timer <= 0:
-            target = random.choice(list(self.stash_stock.keys()))
-            self.stash_stock[target] += 1
-            self.refill_timer = random.uniform(45.0, 90.0)
-            if self.tv_system.on:
-                self.set_message("TV: Supplies shifted in the dark.")
-
-    def update_systems(self, dt):
-        tv_events = self.tv_system.update(
-            dt,
-            {
-                "refill_soon": self.refill_soon,
-                "breach_rising": self.noise > 45 or self.curse_timer > 0,
-                "real_near": self.monster is not None,
-            },
-        )
-        for event in tv_events:
-            self.set_message(event)
-        if self.tv_system.dread_timer > 0:
-            self.dread = clamp(self.dread + 8 * (dt / 1.0), 0, 100)
-
-        breach = self.breach_system.update(
-            dt,
-            {
-                "tv_on": self.tv_system.on,
-                "fan_on": self.fan_on,
-                "moving": self.player.moving,
-                "curse": self.curse_timer > 0,
-            },
-        )
-        if breach and not self.monster:
-            self.spawn_breach()
-        if self.hallucination_system.update(dt, self.sanity) and not self.hallucinating:
-            if self.current_room == ROOM_LIVING and not self.monster:
-                self.spawn_hallucination()
-
-        if self.device_cue_timer > 0:
-            self.device_cue_timer -= dt
-        if self.light_flicker_timer > 0:
-            self.light_flicker_timer -= dt
-
-    def spawn_breach(self):
-        entry = random.choice(["door", "window", "vent"])
-        spawn_points = {
-            "door": (self.living_rect.left + 40, self.living_rect.centery),
-            "window": (self.living_rect.centerx, self.living_rect.top + 20),
-            "vent": (self.living_rect.right - 30, self.living_rect.top + 30),
-        }
-        kind = "dead_girl"
-        if self.liquid_uses >= LIQUID_TENTACLE_THRESHOLD:
-            kind = "tentacle"
-        self.monster = Monster(*spawn_points[entry], kind=kind, real=True)
-        cue_rect = self.get_object_rect("Outside Door" if entry == "door" else "Window" if entry == "window" else "Vent")
-        self.env_cue = {"type": entry, "rect": cue_rect, "room": ROOM_LIVING, "timer": 6.0}
-        self.device_cue_timer = 5.0
-        self.light_flicker_timer = 3.0
-        self.dread = clamp(self.dread + 20, 0, 100)
-        self.set_message("A breach rattles the house.")
-
-    def spawn_hallucination(self):
-        self.hallucinating = True
-        self.hallucination = Monster(self.living_rect.centerx - 120, self.living_rect.centery, real=False)
-        self.set_message("A shadow folds into the room.")
-
-    def update_monsters(self, dt):
-        if self.env_cue:
-            self.env_cue["timer"] -= dt
-            if self.env_cue["timer"] <= 0:
-                self.env_cue = None
-
-        if self.monster:
-            blocked = self.current_room == ROOM_BATH
-            if blocked:
-                self.safe_room_timer += dt
-            else:
-                self.safe_room_timer = 0.0
-            self.monster.update(dt, self.player.rect.center, blocked and self.safe_room_timer < SAFE_ROOM_HOLD)
-            if self.monster.rect().colliderect(self.player.rect) and self.current_room == ROOM_LIVING:
-                name = "Dead Girl" if self.monster.kind == "dead_girl" else "Tentacle Monster"
-                self.die("Monster", name)
-            if self.monster.life <= 0:
-                self.monster = None
-                self.safe_room_timer = 0.0
-
+        self.sanity = clamp(self.sanity + 14 * factor, 0, 100)
+        self.thirst = clamp(self.thirst - 6 * (1.0 + recent * 0.4), 0, 100)
         if self.hallucination:
-            self.hallucination.update(dt, self.player.rect.center, False)
-            if self.current_room == ROOM_BATH:
-                self.hallucination.life -= dt * 1.5
-            if self.hallucination.life <= 0:
-                self.hallucination = None
-                self.hallucinating = False
-
-        if self.hallucination and self.current_room == ROOM_LIVING:
-            dist = math.hypot(self.hallucination.x - self.player.rect.centerx, self.hallucination.y - self.player.rect.centery)
-            if dist < 90 and random.random() < 0.2:
-                self.sanity = clamp(self.sanity - 2.0, 0, 100)
-
-    def check_win(self):
-        if self.time >= WIN_NIGHTS * DAY_LENGTH:
-            self.win = True
-
-    @property
-    def fan_on(self):
-        return any(obj["name"] == "Fan" and obj.get("on") for obj in self.objects)
-
-    def toggle_device(self, name, state=None):
-        for obj in self.objects:
-            if obj["name"] == name:
-                if state is None:
-                    obj["on"] = not obj.get("on", False)
-                else:
-                    obj["on"] = state
-                return obj["on"]
-        return False
+            self.hallucination = None
+            self.hallucination_active = False
+        if factor < 0.8:
+            self.add_message("It isn't working as well...")
+        else:
+            self.add_message("You steady your breathing.")
 
 
 class Game:
     def __init__(self, asset_root):
-        self.asset_root = asset_root
         self.state = GameState(asset_root)
-        self.assets = {}
-        self.load_assets()
-        self.ui = UI(self.screen, self.assets)
+        self.ui = self.state.ui
         self.intro = True
-        self.pause = False
-        self.death_sound_played = False
-        self.sounds = {
-            "dead_girl": make_beep(380, 0.8, 0.6),
-            "tentacle": make_beep(180, 1.0, 0.7),
-        }
-
-    def load_assets(self):
-        self.assets = {
-            "player": assets.load_image(self.asset_root, ASSET_PLAYER),
-            "dead_girl": assets.load_image(self.asset_root, ASSET_DEAD_GIRL),
-            "tentacle": assets.load_image(self.asset_root, ASSET_TENTACLE),
-            "hallucination": assets.load_image(self.asset_root, ASSET_HALLUCINATION),
-            ASSET_TV: assets.load_image(self.asset_root, ASSET_TV),
-            ASSET_FAN: assets.load_image(self.asset_root, ASSET_FAN),
-            ASSET_DOOR: assets.load_image(self.asset_root, ASSET_DOOR),
-            ASSET_WINDOW: assets.load_image(self.asset_root, ASSET_WINDOW),
-            ASSET_VENT: assets.load_image(self.asset_root, ASSET_VENT),
-            ASSET_MIRROR: assets.load_image(self.asset_root, ASSET_MIRROR),
-            ASSET_SINK: assets.load_image(self.asset_root, ASSET_SINK),
-            "jumpscare_girl": assets.load_image(self.asset_root, ASSET_JUMPSCARE_GIRL),
-            "jumpscare_tentacle": assets.load_image(self.asset_root, ASSET_JUMPSCARE_TENTACLE),
-        }
-
-    @property
-    def screen(self):
-        return pygame.display.get_surface()
-
-    def reset(self):
-        self.state = GameState(self.asset_root)
-        self.death_sound_played = False
-        self.intro = False
 
     def handle_input(self, event):
         state = self.state
@@ -495,54 +483,40 @@ class Game:
                 if event.key == pygame.K_RETURN:
                     self.intro = False
                 return
-            if event.key == pygame.K_p:
-                self.pause = not self.pause
             if state.dead or state.win:
                 if event.key == pygame.K_r:
-                    self.reset()
-                if event.key == pygame.K_q:
+                    self.state = GameState(state.asset_root)
+                if event.key == pygame.K_ESCAPE:
                     pygame.event.post(pygame.event.Event(pygame.QUIT))
                 return
             if event.key == pygame.K_TAB:
                 state.switch_room()
+            if event.key == pygame.K_e:
+                state.interact()
+            if event.key == pygame.K_t and state.current_room == ROOM_LIVING:
+                if state.interact_zones["TV"].colliderect(state.player.rect):
+                    state.tv_on = not state.tv_on
+                    state.add_message("TV on." if state.tv_on else "TV off.")
+            if event.key == pygame.K_f and state.current_room == ROOM_LIVING:
+                if state.interact_zones["Fan"].colliderect(state.player.rect):
+                    state.fan_on = not state.fan_on
+                    state.add_message("Fan on." if state.fan_on else "Fan off.")
+            if event.key == pygame.K_b:
+                if self.near_grounding():
+                    state.grounding()
             if event.key in (pygame.K_1, pygame.K_2, pygame.K_3):
                 state.use_item(int(event.unicode))
-            if event.key == pygame.K_e:
-                self.try_interact()
-            if event.key == pygame.K_t:
-                if self.near_object("TV"):
-                    tv_state = state.toggle_device("TV")
-                    state.tv_system.set_on(tv_state)
-                    state.set_message("TV on." if tv_state else "TV off.")
-            if event.key == pygame.K_f:
-                if self.near_object("Fan"):
-                    fan_state = state.toggle_device("Fan")
-                    state.set_message("Fan on." if fan_state else "Fan off.")
-            if event.key == pygame.K_b:
-                if self.near_object("Mirror") or self.near_object("Sink"):
-                    state.grounding()
-
-    def near_object(self, name):
-        state = self.state
-        rect = state.get_object_rect(name)
-        return rect.colliderect(state.player.rect.inflate(40, 40)) and state.current_room == self.object_room(name)
-
-    def object_room(self, name):
-        for obj in self.state.objects:
-            if obj["name"] == name:
-                return obj["room"]
-        return ROOM_LIVING
-
-    def try_interact(self):
-        state = self.state
-        for obj in state.interactables:
-            if obj.near(state.player.rect) and state.current_room == self.object_room(obj.name):
-                state.interact(obj.name)
-                return
+            if event.key == pygame.K_SPACE:
+                state.axe_attack()
+            if event.key == pygame.K_l:
+                state.torch_on = not state.torch_on
+        if event.type == pygame.MOUSEBUTTONDOWN:
+            if event.button == 3:
+                state.torch_on = not state.torch_on
 
     def update(self, dt):
         state = self.state
-        if self.pause or state.dead or state.win or self.intro:
+        if self.intro or state.dead or state.win:
             return
         keys = pygame.key.get_pressed()
         dx = dy = 0
@@ -558,118 +532,147 @@ class Game:
             length = math.hypot(dx, dy)
             dx /= length
             dy /= length
-        bounds = state.living_rect if state.current_room == ROOM_LIVING else state.bath_rect
-        state.player.move(dx, dy, bounds, dt)
+            state.player_dir = (dx, dy)
+        state.player.move(dx, dy, state.room_bounds(), state.current_obstacles(), dt)
         state.update(dt)
 
     def render(self):
         state = self.state
-        self.ui.draw_room(state)
-        self.ui.draw_objects(state)
+        bg = state.assets["bg_living"] if state.current_room == ROOM_LIVING else state.assets["bg_bath"]
+        state.ui.screen.blit(bg, (0, 0))
 
-        player_sprite = self.assets["player"]
-        self.ui.draw_player(player_sprite, state.player.rect)
+        for obs in state.current_obstacles():
+            pygame.draw.rect(state.ui.screen, (20, 20, 30, 80), obs)
 
-        fan_mask = state.fan_on
-        if state.monster and state.current_room == ROOM_LIVING:
-            sprite = self.assets["dead_girl"] if state.monster.kind == "dead_girl" else self.assets["tentacle"]
-            self.ui.draw_monster(state.monster, sprite, shadow=True, fan_mask=fan_mask)
-        if state.hallucination and state.current_room == ROOM_LIVING:
-            sprite = self.assets["hallucination"]
-            self.ui.draw_monster(state.hallucination, sprite, shadow=False, fan_mask=fan_mask)
+        # Draw dog
+        if state.dog.alive:
+            state.ui.screen.blit(state.assets["dog"], state.dog.rect.topleft)
+        elif state.dog_dead and state.current_room == ROOM_LIVING:
+            state.ui.screen.blit(state.assets["dead_dog"], (200, 420))
 
-        if state.device_cue_timer > 0 and state.tv_system.on:
-            tv_rect = state.get_object_rect("TV")
-            static = pygame.Surface((tv_rect.w, tv_rect.h), pygame.SRCALPHA)
-            for _ in range(10):
-                x = random.randint(0, tv_rect.w)
-                y = random.randint(0, tv_rect.h)
-                pygame.draw.rect(static, (200, 200, 200, 120), (x, y, 6, 2))
-            self.screen.blit(static, tv_rect.topleft)
+        # Draw enemies
+        if state.ghost and not state.ghost.banished:
+            sprite = state.assets["ghost_red"] if state.ghost.attack_timer > 6.0 else state.assets["ghost"]
+            shadow_alpha = 140 if not state.fan_on else 60
+            shadow = pygame.Surface((40, 16), pygame.SRCALPHA)
+            pygame.draw.ellipse(shadow, (20, 20, 20, shadow_alpha), (0, 0, 40, 16))
+            state.ui.screen.blit(shadow, (state.ghost.rect().centerx - 20, state.ghost.rect().bottom - 6))
+            if random.random() < 0.1:
+                ghost_sprite = sprite.copy()
+                ghost_sprite.set_alpha(180)
+            else:
+                ghost_sprite = sprite
+            state.ui.screen.blit(ghost_sprite, state.ghost.rect().topleft)
+            if state.tv_on and state.current_room == ROOM_LIVING:
+                dist = distance(state.player.rect.center, (state.ghost.x, state.ghost.y))
+                if dist < 160:
+                    tv_rect = state.interact_zones["TV"]
+                    static = pygame.Surface((tv_rect.w, tv_rect.h), pygame.SRCALPHA)
+                    for _ in range(10):
+                        x = random.randint(0, tv_rect.w)
+                        y = random.randint(0, tv_rect.h)
+                        pygame.draw.rect(static, (200, 200, 200, 120), (x, y, 6, 2))
+                    state.ui.screen.blit(static, tv_rect.topleft)
 
-        if state.light_flicker_timer > 0:
-            overlay = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
-            overlay.fill((20, 20, 30, 40))
-            self.screen.blit(overlay, (0, 0))
+        if state.hallucination:
+            sprite = state.assets["ghost"].copy()
+            sprite.set_alpha(120)
+            state.ui.screen.blit(sprite, state.hallucination.rect().topleft)
 
-        self.ui.draw_hud(state)
-        prompt = self.current_prompt()
-        self.ui.draw_prompt(prompt)
-        self.ui.draw_effects(state)
+        if state.tentacle:
+            state.ui.screen.blit(state.assets["tentacle"], state.tentacle.rect().topleft)
+
+        # Player
+        state.ui.screen.blit(state.assets["player"], state.player.rect.topleft)
+
+        # Torch cone
+        if state.torch_on:
+            cone = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+            origin = state.player.rect.center
+            pygame.draw.polygon(
+                cone,
+                (200, 200, 140, 60),
+                [
+                    origin,
+                    (origin[0] + state.player_dir[0] * 260 - state.player_dir[1] * 120,
+                     origin[1] + state.player_dir[1] * 260 + state.player_dir[0] * 120),
+                    (origin[0] + state.player_dir[0] * 260 + state.player_dir[1] * 120,
+                     origin[1] + state.player_dir[1] * 260 - state.player_dir[0] * 120),
+                ],
+            )
+            state.ui.screen.blit(cone, (0, 0))
+
+        state.ui.draw_hud(state)
+        state.ui.draw_effects(state)
+        state.ui.draw_prompt(self.current_prompt())
 
         if self.intro:
-            self.draw_intro()
-        if self.pause:
-            self.ui.draw_pause()
+            state.ui.draw_intro()
         if state.dead:
-            self.draw_death()
+            monster_surface = None
+            monster_name = state.death_cause
+            if state.death_cause == "Monster":
+                monster_name = state.death_monster
+                if monster_name == "Dead Girl":
+                    monster_surface = state.assets["ghost_red"]
+                elif monster_name == "Tentacle Monster":
+                    monster_surface = state.assets["tentacle"]
+            state.ui.draw_death(state, monster_surface, monster_name)
+            d, h, m = state.time_breakdown()
+            summary = [
+                f"Time survived: Day {d} Hour {h:02d}:{m:02d}",
+                f"Cause: {state.death_cause}",
+                f"Liquid uses: {state.liquid_uses}",
+                f"TV time: {int(state.tv_time)}s",
+                f"Noise peak: {int(state.noise_peak)}",
+            ]
+            state.ui.draw_summary(summary)
         if state.win:
-            self.draw_win()
+            d, h, m = state.time_breakdown()
+            summary = [
+                f"Time survived: Day {d} Hour {h:02d}:{m:02d}",
+                "You survived all five days.",
+                f"Liquid uses: {state.liquid_uses}",
+                f"TV time: {int(state.tv_time)}s",
+                f"Noise peak: {int(state.noise_peak)}",
+            ]
+            state.ui.draw_death(state, None, "Survived")
+            state.ui.draw_summary(summary)
 
     def current_prompt(self):
         state = self.state
-        for obj in state.interactables:
-            if obj.near(state.player.rect) and state.current_room == self.object_room(obj.name):
-                return obj.prompt
+        if state.current_room == ROOM_LIVING:
+            if state.interact_zones["Door"].colliderect(state.player.rect):
+                return "Press E to open the door"
+            if state.interact_zones["TV"].colliderect(state.player.rect):
+                return "Press T to toggle TV"
+            if state.interact_zones["Fan"].colliderect(state.player.rect):
+                return "Press F to toggle Fan"
+            if state.interact_zones["Stash"].colliderect(state.player.rect):
+                return "Press E to search stash"
+        if state.current_room == ROOM_BATH:
+            if state.interact_zones["Sink"].colliderect(state.player.rect):
+                return "Press E to use sink"
+            if self.near_grounding():
+                return "Press B to ground yourself"
         return ""
 
-    def draw_intro(self):
-        lines = [
-            "Horror House Survival",
-            "You are trapped inside. Outside means death.",
-            "Move: WASD/Arrows  Interact: E  Switch Room: TAB",
-            "TV: T  Fan: F  Grounding: B  Use Items: 1-3",
-            "Survive three nights.",
-            "Press Enter to start.",
-        ]
-        self.screen.fill((10, 10, 12))
-        for i, line in enumerate(lines):
-            img = self.ui.big.render(line, True, (240, 240, 240))
-            self.screen.blit(img, (WIDTH / 2 - img.get_width() / 2, 120 + i * 42))
-
-    def draw_death(self):
+    def near_grounding(self):
         state = self.state
-        summary = [
-            f"Time survived: {int(state.time)}s",
-            f"Cause: {state.death_cause}",
-            f"Liquid uses: {state.liquid_uses}",
-        ]
-        if state.death_cause == "Monster":
-            summary.append(f"Monster: {state.death_monster}")
-        if state.death_cause == "Outside":
-            summary.append("Monster: Outside")
-        if state.death_cause == "Monster":
-            if state.death_monster == "Dead Girl":
-                if not self.death_sound_played:
-                    self.sounds["dead_girl"].play()
-                    self.death_sound_played = True
-                self.ui.draw_jumpscare(self.assets["jumpscare_girl"], "Dead Girl")
-            else:
-                if not self.death_sound_played:
-                    self.sounds["tentacle"].play()
-                    self.death_sound_played = True
-                self.ui.draw_jumpscare(self.assets["jumpscare_tentacle"], "Tentacle Monster")
-            self.ui.draw_end("You Died", summary)
-        else:
-            self.ui.draw_end("You Died", summary)
-
-    def draw_win(self):
-        state = self.state
-        summary = [
-            f"Time survived: {int(state.time)}s",
-            "You held out through the nights.",
-        ]
-        self.ui.draw_end("You Survived", summary)
+        if state.current_room != ROOM_BATH:
+            return False
+        return state.interact_zones["Sink"].colliderect(state.player.rect) or state.interact_zones["Mirror"].colliderect(state.player.rect)
 
 
 def run_game():
     pygame.init()
-    pygame.mixer.init()
+    try:
+        pygame.mixer.init()
+    except pygame.error:
+        pass
     pygame.display.set_mode((WIDTH, HEIGHT))
     asset_root = os.path.join(os.path.dirname(__file__), "..", "assets")
     asset_root = os.path.abspath(asset_root)
-    assets.ensure_assets(asset_root)
-
     clock = pygame.time.Clock()
     game = Game(asset_root)
 
