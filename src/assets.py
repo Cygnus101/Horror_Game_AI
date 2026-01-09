@@ -15,6 +15,8 @@ from .constants import (
     ASSET_TENTACLE,
 )
 
+SPRITE_SCALE = 1 / 15.0
+
 
 def resolve_path(asset_root, rel_path):
     primary = os.path.join(asset_root, rel_path)
@@ -45,13 +47,18 @@ def load_image(asset_root, rel_path, size=None):
 
 
 def load_assets(asset_root):
+    def scale_sprite(surface):
+        w = max(1, int(surface.get_width() * SPRITE_SCALE))
+        h = max(1, int(surface.get_height() * SPRITE_SCALE))
+        return pygame.transform.smoothscale(surface, (w, h))
+
     return {
         "bg_living": load_image(asset_root, ASSET_BG_LIVING, (960, 540)),
         "bg_bath": load_image(asset_root, ASSET_BG_BATH, (960, 540)),
-        "player": load_image(asset_root, ASSET_PLAYER),
-        "dog": load_image(asset_root, ASSET_DOG),
-        "dead_dog": load_image(asset_root, ASSET_DEAD_DOG),
-        "ghost": load_image(asset_root, ASSET_GHOST),
-        "ghost_red": load_image(asset_root, ASSET_GHOST_RED),
-        "tentacle": load_image(asset_root, ASSET_TENTACLE),
+        "player": scale_sprite(load_image(asset_root, ASSET_PLAYER)),
+        "dog": scale_sprite(load_image(asset_root, ASSET_DOG)),
+        "dead_dog": scale_sprite(load_image(asset_root, ASSET_DEAD_DOG)),
+        "ghost": scale_sprite(load_image(asset_root, ASSET_GHOST)),
+        "ghost_red": scale_sprite(load_image(asset_root, ASSET_GHOST_RED)),
+        "tentacle": scale_sprite(load_image(asset_root, ASSET_TENTACLE)),
     }

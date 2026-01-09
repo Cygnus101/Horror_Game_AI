@@ -12,8 +12,8 @@ DOG_SPEED = 140
 
 METER_MAX = 100
 
-# Time: 1 hour = 120 seconds, 12 hours per day
-HOUR_SECONDS = 120.0
+# Time: 1 hour = 60 seconds, 12 hours per day (faster pacing)
+HOUR_SECONDS = 60.0
 HOURS_PER_DAY = 12
 DAY_SECONDS = HOUR_SECONDS * HOURS_PER_DAY
 TOTAL_DAYS = 5

@@ -77,6 +77,7 @@ class GameState:
         self.current_room = ROOM_LIVING
         self.living_bounds = pygame.Rect(40, 40, 880, 460)
         self.bath_bounds = pygame.Rect(80, 80, 800, 420)
+        self.doorway_y = (240, 320)
 
         self.obstacles = {
             ROOM_LIVING: [
@@ -97,6 +98,7 @@ class GameState:
             "Bathtub": pygame.Rect(540, 160, 160, 80),
             "Mirror": pygame.Rect(620, 220, 80, 60),
             "Stash": pygame.Rect(420, 360, 80, 40),
+            "TopDoor": pygame.Rect(440, 70, 80, 40),
         }
 
         self.player = Player(self.living_bounds.centerx, self.living_bounds.centery)
@@ -183,10 +185,25 @@ class GameState:
         self.player.rect.center = (bounds.centerx, bounds.centery)
         self.add_message(f"Entered {self.current_room}.")
 
+    def check_room_connection(self):
+        if self.current_room == ROOM_LIVING:
+            if self.player.rect.right >= self.living_bounds.right - 2:
+                if self.doorway_y[0] <= self.player.rect.centery <= self.doorway_y[1]:
+                    self.current_room = ROOM_BATH
+                    self.player.rect.center = (self.bath_bounds.left + 10, self.player.rect.centery)
+                    self.add_message("You slip into the bathroom.")
+        else:
+            if self.player.rect.left <= self.bath_bounds.left + 2:
+                if self.doorway_y[0] <= self.player.rect.centery <= self.doorway_y[1]:
+                    self.current_room = ROOM_LIVING
+                    self.player.rect.center = (self.living_bounds.right - 10, self.player.rect.centery)
+                    self.add_message("You step back into the living room.")
+
     def update(self, dt):
         if self.dead or self.win:
             return
         self.time_system.update(dt)
+        self.check_room_connection()
         self.update_day_state()
         self.update_meters(dt)
         self.update_noise(dt)
@@ -316,7 +333,9 @@ class GameState:
         if truthful:
             self.add_message(f"TV: {random.choice(hints)}")
         else:
-            self.add_message(f\"TV: {random.choice(['All clear.', 'No breach expected.', 'Stay by the door.', 'Nothing out there.'])}\")
+            self.add_message(
+                f"TV: {random.choice(['All clear.', 'No breach expected.', 'Stay by the door.', 'Nothing out there.'])}"
+            )
         if random.random() < 0.2:
             self.sanity = clamp(self.sanity - 6, 0, 100)
             self.add_message("The broadcast buzzes inside your head.")
@@ -423,6 +442,11 @@ class GameState:
     def interact(self):
         if self.current_room == ROOM_LIVING and self.interact_zones["Door"].colliderect(self.player.rect):
             self.kill("Outside", "Outside")
+            return
+        if self.current_room == ROOM_LIVING and self.interact_zones["TopDoor"].colliderect(self.player.rect):
+            self.current_room = ROOM_BATH
+            self.player.rect.center = (self.bath_bounds.left + 40, self.player.rect.centery)
+            self.add_message("You slip into the bathroom.")
             return
         if self.current_room == ROOM_LIVING and self.interact_zones["TV"].colliderect(self.player.rect):
             self.tv_on = not self.tv_on
@@ -644,6 +668,8 @@ class Game:
         if state.current_room == ROOM_LIVING:
             if state.interact_zones["Door"].colliderect(state.player.rect):
                 return "Press E to open the door"
+            if state.interact_zones["TopDoor"].colliderect(state.player.rect):
+                return "Press E to enter bathroom"
             if state.interact_zones["TV"].colliderect(state.player.rect):
                 return "Press T to toggle TV"
             if state.interact_zones["Fan"].colliderect(state.player.rect):
