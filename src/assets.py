@@ -15,7 +15,7 @@ from .constants import (
     ASSET_TENTACLE,
 )
 
-SPRITE_SCALE = 1 / 15.0
+SPRITE_SCALE = 1 / 10.0
 
 
 def resolve_path(asset_root, rel_path):

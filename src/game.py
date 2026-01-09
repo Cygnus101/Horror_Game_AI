@@ -565,9 +565,6 @@ class Game:
         bg = state.assets["bg_living"] if state.current_room == ROOM_LIVING else state.assets["bg_bath"]
         state.ui.screen.blit(bg, (0, 0))
 
-        for obs in state.current_obstacles():
-            pygame.draw.rect(state.ui.screen, (20, 20, 30, 80), obs)
-
         # Draw dog
         if state.dog.alive:
             state.ui.screen.blit(state.assets["dog"], state.dog.rect.topleft)
