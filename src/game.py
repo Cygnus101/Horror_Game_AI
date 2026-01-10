@@ -260,7 +260,7 @@ class GameState:
         if self.hallucination:
             dist = distance(self.player.rect.center, (self.hallucination.x, self.hallucination.y))
             if dist < 90 and random.random() < 0.2:
-                self.sanity = clamp(self.sanity - 2.0, 0, 100)
+                self.sanity = clamp(self.sanity - 1.0, 0, 100)
 
         if self.hunger <= 0:
             self.kill("Hunger")
